@@ -61,6 +61,13 @@ func NewPool(parentCtx context.Context, config PoolConfig) (*Pool, error) {
 		cancelFunc:  cancel,
 	}
 
+	// Initialize all metric counters to zero
+	pool.metrics = PoolMetrics{}
+	pool.metrics.TasksQueued.Store(0)
+	pool.metrics.TasksCompleted.Store(0)
+	pool.metrics.TasksFailed.Store(0)
+	pool.metrics.TasksProcessed.Store(0)
+
 	pool.isRunning.Store(false)
 
 	return pool, nil
@@ -191,10 +198,5 @@ func (p *Pool) executeTask(workerId int, task Work) {
 
 // GetMetrics returns the current metrics for the worker pool.
 func (p *Pool) GetMetrics() PoolMetrics {
-	return PoolMetrics{
-		TasksQueued:    atomic.Int64{},
-		TasksCompleted: atomic.Int64{},
-		TasksFailed:    atomic.Int64{},
-		TasksProcessed: atomic.Int64{},
-	}
+	return p.metrics
 }
