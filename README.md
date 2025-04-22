@@ -1,10 +1,11 @@
 # Chasqui: Concurrent Background Task Processing in Go
 
-Chasqui is a Go library for executing multiple background tasks concurrently using a worker pool pattern. The library provides a simple, efficient way to process tasks asynchronously with proper error handling, logging, and graceful shutdown capabilities.
+Chasqui is a Go library for executing multiple background tasks concurrently using a worker pool pattern with a modular architecture. The library provides a simple, efficient way to process tasks asynchronously with proper error handling, logging, and graceful shutdown capabilities.
 
 ## Features
 
-- **Worker Pool**: Manages a configurable number of goroutines to process tasks concurrently
+- **Modular Architecture**: Independent modules that can be enabled or disabled
+- **Worker Pool**: Manages a configurable number of goroutines to process tasks concurrently (Hephaestus module)
 - **Task Interface**: Common `Work` interface for implementing diverse task types
 - **Dispatcher**: Batches and schedules tasks efficiently
 - **Graceful Shutdown**: Proper handling of in-progress tasks during shutdown
@@ -19,209 +20,84 @@ Chasqui is a Go library for executing multiple background tasks concurrently usi
 go get github.com/user/chasqui
 ```
 
-## Quick Start
+## Module System
+
+Chasqui uses a modular architecture where components can operate independently and potentially be moved to separate services in the future.
+
+### Available Modules
+
+1. **Hephaestus Module** - The Greek god of craftsmanship and automation - is the module responsible for processing background tasks. It provides:
+   - Worker pool for concurrent task execution
+   - Task dispatcher for batching
+   - Metrics for monitoring
+
+2. **Generator Module** - Creates example tasks and submits them to the Hephaestus module for processing.
+
+### Module Interface
+
+All modules implement the following interface:
 
 ```go
-package main
-
-import (
-	"context"
-	"log"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
-
-	"github.com/user/chasqui/examples"
-	"github.com/user/chasqui/pkg/logger"
-	"github.com/user/chasqui/pkg/worker"
-)
-
-func main() {
-	// Create a logger
-	log := logger.New(logger.INFO)
-
-	// Create a worker pool with 5 workers and a queue size of 100
-	pool, err := worker.NewPool(worker.PoolConfig{
-		Workers:   5,
-		QueueSize: 100,
-		Logger:    log,
-	})
-	if err != nil {
-		log.Fatal("Failed to create worker pool: %v", err)
-	}
-
-	// Start the worker pool
-	if err := pool.Start(); err != nil {
-		log.Fatal("Failed to start worker pool: %v", err)
-	}
-
-	// Create a task
-	task := examples.NewSleepTask(2 * time.Second)
-
-	// Submit the task to the pool
-	if err := pool.Submit(task); err != nil {
-		log.Error("Failed to submit task: %v", err)
-	}
-
-	// Wait for signals to gracefully shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	signalCh := make(chan os.Signal, 1)
-	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-signalCh
-		cancel()
-	}()
-
-	// Wait for cancellation
-	<-ctx.Done()
-
-	// Gracefully shutdown the pool
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	if err := pool.Shutdown(shutdownCtx); err != nil {
-		log.Error("Error shutting down worker pool: %v", err)
-	}
-}
-```
-
-## Creating Custom Tasks
-
-To create a custom task, implement the `Work` interface:
-
-```go
-type MyCustomTask struct {
-	id   string
-	name string
-	// Custom task fields
-}
-
-// NewMyCustomTask creates a new custom task
-func NewMyCustomTask() *MyCustomTask {
-	return &MyCustomTask{
-		id:   uuid.New().String(),
-		name: "MyCustomTask",
-	}
-}
-
-// Execute implements the worker.Work interface
-func (t *MyCustomTask) Execute(ctx context.Context) error {
-	// Implement your task logic here
-	// Check for ctx.Done() to handle cancellation
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		// Do work
-		return nil
-	}
-}
-
-// ID implements the worker.Work interface
-func (t *MyCustomTask) ID() string {
-	return t.id
-}
-
-// Name implements the worker.Work interface
-func (t *MyCustomTask) Name() string {
-	return t.name
-}
-```
-
-## Using the Dispatcher
-
-For more advanced usage, you can use the dispatcher to batch process tasks:
-
-```go
-// Create and start a dispatcher
-dispatcher, err := worker.NewDispatcher(worker.DispatcherConfig{
-	Pool:      pool,
-	Logger:    log,
-	BatchSize: 10,
-})
-if err != nil {
-	log.Fatal("Failed to create dispatcher: %v", err)
-}
-
-if err := dispatcher.Start(); err != nil {
-	log.Fatal("Failed to start dispatcher: %v", err)
-}
-
-// Create a channel of tasks
-taskChan := make(chan worker.Work, 100)
-
-// Process tasks from the channel
-if err := dispatcher.ProcessChannel(taskChan); err != nil {
-	log.Fatal("Failed to process task channel: %v", err)
-}
-
-// Submit a batch of tasks
-tasks := []worker.Work{
-	examples.NewSleepTask(1 * time.Second),
-	examples.NewSleepTask(2 * time.Second),
-}
-submitted, err := dispatcher.DispatchBatch(tasks)
-if err != nil {
-	log.Error("Failed to dispatch batch: %v", err)
-}
-log.Info("Submitted %d tasks", submitted)
-
-// Shutdown the dispatcher
-if err := dispatcher.Shutdown(shutdownCtx); err != nil {
-	log.Error("Error shutting down dispatcher: %v", err)
-}
-```
-
-## Handling Backpressure
-
-To handle queue overflow, you can use the `TrySubmit` method instead of `Submit`:
-
-```go
-// TrySubmit will return an error immediately if the queue is full
-if err := pool.TrySubmit(task); err != nil {
-	if err.Error() == "task queue is full" {
-		// Handle backpressure
-		log.Warn("Task queue is full, implementing backoff strategy")
-		// ... backoff logic ...
-	} else {
-		log.Error("Failed to submit task: %v", err)
-	}
+type Module interface {
+    // Name returns the module's name
+    Name() string
+    
+    // Init initializes the module with the provided config
+    Init(cfg any) error
+    
+    // Start starts the module (and blocks until error or Stop is called)
+    Start() error
+    
+    // Stop gracefully stops the module
+    Stop(ctx context.Context) error
+    
+    // Dependencies returns other module names this module depends on
+    Dependencies() []string
 }
 ```
 
 ## Configuration
 
-The worker pool and dispatcher can be configured with various options:
+Chasqui uses environment variables for configuration. The following variables are available:
 
-```go
-// Pool configuration
-poolConfig := worker.PoolConfig{
-	Workers:   10,               // Number of concurrent workers
-	QueueSize: 1000,             // Size of the task queue
-	Logger:    logger.New(logger.DEBUG),  // Logger with desired level
-}
+### General Configuration
 
-// Dispatcher configuration
-dispatcherConfig := worker.DispatcherConfig{
-	Pool:      pool,             // The worker pool to use
-	Logger:    log,              // Logger instance
-	BatchSize: 50,               // Maximum batch size
-}
+- `CHASQUI_MODULES` - Comma-separated list of modules to enable (default: "hephaestus,generator")
+
+### Hephaestus Module Configuration
+
+- `CHASQUI_HEPHAESTUS_WORKERS` - Number of workers in the pool (default: 5)
+- `CHASQUI_HEPHAESTUS_QUEUE_SIZE` - Size of the task queue (default: 100)
+- `CHASQUI_HEPHAESTUS_BATCH_SIZE` - Batch size for the dispatcher (default: 10)
+- `CHASQUI_HEPHAESTUS_SHUTDOWN_WAIT` - Wait time for graceful shutdown in seconds (default: 10)
+
+### Generator Module Configuration
+
+- `CHASQUI_GENERATOR_COUNT` - Number of tasks to generate (default: 50)
+- `CHASQUI_GENERATOR_INTERVAL` - Interval between task generation (default: 50ms)
+
+See [.env.example](.env.example) for a complete list of configuration options.
+
+## Quick Start
+
+1. Clone the repository
+2. Create a `.env` file with your configuration (or use the defaults)
+3. Build and run:
+
+```bash
+go build -o chasqui ./cmd/chasqui
+./chasqui
 ```
 
-## Metrics
+## Development
 
-You can retrieve metrics from the worker pool:
+To extend Chasqui with new modules:
 
-```go
-metrics := pool.GetMetrics()
-fmt.Printf("Tasks Queued:    %d\n", metrics.TasksQueued.Load())
-fmt.Printf("Tasks Processed: %d\n", metrics.TasksProcessed.Load())
-fmt.Printf("Tasks Completed: %d\n", metrics.TasksCompleted.Load())
-fmt.Printf("Tasks Failed:    %d\n", metrics.TasksFailed.Load())
-```
+1. Create a new package in `pkg/modules/<your-module-name>`
+2. Implement the `module.Module` interface
+3. Create a factory function to initialize your module from configuration
+4. Register your module in `main.go`
 
 ## License
 
-MIT 
+This project is licensed under the MIT License - see the LICENSE file for details. 

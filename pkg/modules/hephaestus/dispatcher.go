@@ -1,10 +1,9 @@
-package worker
+package hephaestus
 
 import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/user/chasqui/pkg/logger"
 )
@@ -15,7 +14,7 @@ type Dispatcher struct {
 	pool      *Pool
 	log       *logger.Logger
 	batchSize int
-	isRunning atomic.Bool
+	isRunning bool
 	wg        sync.WaitGroup
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -57,7 +56,7 @@ func NewDispatcher(parentCtx context.Context, config DispatcherConfig) (*Dispatc
 // DispatchBatch submits a batch of tasks to the worker pool.
 // It returns the number of tasks successfully submitted and any error that occurred.
 func (d *Dispatcher) DispatchBatch(tasks []Work) (int, error) {
-	if !d.isRunning.Load() {
+	if !d.isRunning {
 		return 0, fmt.Errorf("dispatcher is not running")
 	}
 
@@ -77,7 +76,7 @@ func (d *Dispatcher) DispatchBatch(tasks []Work) (int, error) {
 // ProcessChannel starts processing tasks from the given channel and submitting them to the worker pool.
 // It returns immediately and processes tasks in the background.
 func (d *Dispatcher) ProcessChannel(taskChan <-chan Work) error {
-	if !d.isRunning.Load() {
+	if !d.isRunning {
 		return fmt.Errorf("dispatcher is not running")
 	}
 
@@ -127,27 +126,27 @@ func (d *Dispatcher) ProcessChannel(taskChan <-chan Work) error {
 
 // Start initializes and starts the dispatcher.
 func (d *Dispatcher) Start() error {
-	if d.isRunning.Load() {
+	if d.isRunning {
 		return fmt.Errorf("dispatcher is already running")
 	}
 
 	d.log.Info("Starting task dispatcher")
-	d.isRunning.Store(true)
+	d.isRunning = true
 	return nil
 }
 
 // Shutdown gracefully stops the dispatcher.
 // It waits for all background processing to complete.
-func (d *Dispatcher) Shutdown(timeout context.Context) error {
-	if !d.isRunning.Load() {
-		return fmt.Errorf("dispatcher is not running")
+func (d *Dispatcher) Shutdown(ctx context.Context) error {
+	if !d.isRunning {
+		return nil
 	}
 
-	d.log.Info("Initiating graceful shutdown of dispatcher")
-	d.isRunning.Store(false)
-	d.cancel() // Signal processors to stop
+	d.log.Info("Shutting down task dispatcher")
+	d.isRunning = false
+	d.cancel() // Signal all processing to stop
 
-	// Wait for all processors to complete with timeout
+	// Wait for all processors to finish with a timeout
 	done := make(chan struct{})
 	go func() {
 		d.wg.Wait()
@@ -156,9 +155,9 @@ func (d *Dispatcher) Shutdown(timeout context.Context) error {
 
 	select {
 	case <-done:
-		d.log.Info("Dispatcher shutdown completed successfully")
+		d.log.Info("Task dispatcher shut down successfully")
 		return nil
-	case <-timeout.Done():
-		return fmt.Errorf("timeout waiting for dispatcher to finish: %v", timeout.Err())
+	case <-ctx.Done():
+		return fmt.Errorf("dispatcher shutdown timed out: %w", ctx.Err())
 	}
 }

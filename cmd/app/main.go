@@ -5,239 +5,104 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/user/chasqui/examples"
+	"github.com/user/chasqui/pkg/config"
 	"github.com/user/chasqui/pkg/logger"
-	"github.com/user/chasqui/pkg/worker"
+	"github.com/user/chasqui/pkg/module"
+	"github.com/user/chasqui/pkg/modules/generator"
+	"github.com/user/chasqui/pkg/modules/hephaestus"
 )
 
-// Configuration for the application
-type Config struct {
-	WorkerCount    int
-	QueueSize      int
-	BatchSize      int
-	TaskCount      int
-	ShutdownWait   time.Duration
-	LogLevel       logger.LogLevel
-	SkipBatchTasks bool // Option to skip batch task processing for faster testing
-}
-
-// AppContext holds all application components
-type AppContext struct {
-	config     Config
-	log        *logger.Logger
-	pool       *worker.Pool
-	dispatcher *worker.Dispatcher
-	ctx        context.Context
-	cancel     context.CancelFunc
-}
-
 func main() {
-	// Initialize application
-	app := initializeApp()
+	// Create logger
+	log := logger.New(logger.INFO)
+	log.Info("Starting Chasqui application")
 
-	// Run the application
-	if err := runApplication(app); err != nil {
-		app.log.Fatal("Application failed: %v", err)
+	// Load configuration
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.Fatal("Failed to load configuration: %v", err)
 	}
 
-	app.log.Info("Chasqui has exited")
-}
+	// Print configuration
+	config.PrintConfig(cfg)
 
-// initializeApp creates and initializes the application components
-func initializeApp() *AppContext {
-	// Create application config
-	config := Config{
-		WorkerCount:    5,
-		QueueSize:      100,
-		BatchSize:      10,
-		TaskCount:      10,
-		ShutdownWait:   10 * time.Second,
-		LogLevel:       logger.DEBUG,
-		SkipBatchTasks: true, // Test only manual tasks
+	// Create application context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Initialize module registry
+	registry := module.NewRegistry(log)
+	module.SetRegistry(registry)
+
+	// Register modules based on configuration
+	if err := registerModules(ctx, log, cfg, registry); err != nil {
+		log.Fatal("Failed to register modules: %v", err)
 	}
 
-	// Initialize logger
-	log := logger.New(config.LogLevel)
-	log.Info("Starting Chasqui - Concurrent Background Task Processing System")
-
-	// Create a context that will be canceled on SIGINT or SIGTERM
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-
-	return &AppContext{
-		config: config,
-		log:    log,
-		ctx:    ctx,
-		cancel: cancel,
+	// Initialize modules
+	for _, moduleName := range cfg.EnabledModules {
+		if err := registry.InitModule(moduleName, cfg); err != nil {
+			log.Fatal("Failed to initialize module %s: %v", moduleName, err)
+		}
 	}
-}
 
-// runApplication runs the main application logic
-func runApplication(app *AppContext) error {
+	// Start modules
+	for _, moduleName := range cfg.EnabledModules {
+		if err := registry.StartModule(moduleName); err != nil {
+			log.Fatal("Failed to start module %s: %v", moduleName, err)
+		}
+	}
+
+	log.Info("All modules started successfully")
+
 	// Set up signal handling for graceful shutdown
-	setupSignalHandling(app)
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Initialize worker pool and dispatcher
-	if err := setupWorkerComponents(app); err != nil {
-		return err
+	// Wait for termination signal
+	sig := <-signalChan
+	log.Info("Received signal %v, shutting down...", sig)
+
+	// Create shutdown context with timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	// Stop all modules
+	if err := registry.StopAllModules(shutdownCtx); err != nil {
+		log.Error("Error stopping modules: %v", err)
+		os.Exit(1)
 	}
 
-	// Create and submit some manual task examples
-	submitManualTasks(app)
+	log.Info("Chasqui application stopped successfully")
+}
 
-	// Generate and process batch tasks if not skipped
-	if !app.config.SkipBatchTasks {
-		if err := processBatchTasks(app); err != nil {
-			return err
+// registerModules registers all available modules with the registry
+func registerModules(ctx context.Context, log *logger.Logger, cfg *config.Config, registry *module.Registry) error {
+	// Define module factories
+	factories := map[string]func(context.Context, *logger.Logger, *config.Config) (module.Module, error){
+		"hephaestus": hephaestus.Factory,
+		"generator":  generator.Factory,
+	}
+
+	// Register enabled modules
+	for _, moduleName := range cfg.EnabledModules {
+		factory, exists := factories[moduleName]
+		if !exists {
+			return fmt.Errorf("unknown module: %s", moduleName)
 		}
-	} else {
-		app.log.Info("Skipping batch task processing for testing")
-	}
 
-	// Wait for completion or interruption
-	waitForCompletion(app)
+		module, err := factory(ctx, log, cfg)
+		if err != nil {
+			return fmt.Errorf("failed to create module %s: %w", moduleName, err)
+		}
 
-	// Display final metrics
-	displayMetrics(app.pool)
-
-	return nil
-}
-
-// setupSignalHandling configures signal handling for graceful shutdown
-func setupSignalHandling(app *AppContext) {
-	signalCh := make(chan os.Signal, 1)
-	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		sig := <-signalCh
-		app.log.Info("Received signal: %v", sig)
-		app.cancel()
-	}()
-}
-
-// setupWorkerComponents creates and initializes the worker pool and dispatcher
-func setupWorkerComponents(app *AppContext) error {
-	var err error
-
-	// Create and start the worker pool
-	app.pool, err = worker.NewPool(app.ctx, worker.PoolConfig{
-		Workers:   app.config.WorkerCount,
-		QueueSize: app.config.QueueSize,
-		Logger:    app.log,
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to create worker pool: %w", err)
-	}
-
-	if err := app.pool.Start(); err != nil {
-		return fmt.Errorf("failed to start worker pool: %w", err)
-	}
-
-	// Create and start the dispatcher
-	app.dispatcher, err = worker.NewDispatcher(app.ctx, worker.DispatcherConfig{
-		Pool:      app.pool,
-		Logger:    app.log,
-		BatchSize: app.config.BatchSize,
-	})
-
-	if err != nil {
-		return fmt.Errorf("failed to create dispatcher: %w", err)
-	}
-
-	if err := app.dispatcher.Start(); err != nil {
-		return fmt.Errorf("failed to start dispatcher: %w", err)
+		if err := registry.Register(module); err != nil {
+			return fmt.Errorf("failed to register module %s: %w", moduleName, err)
+		}
 	}
 
 	return nil
-}
-
-// submitManualTasks creates and submits individual task examples
-func submitManualTasks(app *AppContext) {
-	app.log.Info("Creating and submitting manual task examples")
-
-	// Create a sleep task
-	sleepTask := examples.NewSleepTask(200*time.Millisecond, app.log)
-	if err := app.pool.Submit(sleepTask); err != nil {
-		app.log.Error("Failed to submit sleep task: %v", err)
-	}
-
-	// Create a processing task
-	processingTask := examples.NewProcessingTask("ManualProcessingTask", 5, 300*time.Millisecond, app.log)
-	if err := app.pool.Submit(processingTask); err != nil {
-		app.log.Error("Failed to submit processing task: %v", err)
-	}
-
-	// Create a failing task
-	failingTask := examples.NewFailingTask(0.8, 100*time.Millisecond, app.log)
-	if err := app.pool.Submit(failingTask); err != nil {
-		app.log.Error("Failed to submit failing task: %v", err)
-	}
-}
-
-// processBatchTasks generates and processes batch tasks
-func processBatchTasks(app *AppContext) error {
-	// Create task generator
-	taskGenerator := examples.NewTaskGenerator(app.log)
-
-	// Generate tasks
-	taskChan := taskGenerator.Generate(app.ctx, app.config.TaskCount)
-
-	// Process tasks from the channel
-	if err := app.dispatcher.ProcessChannel(taskChan); err != nil {
-		return fmt.Errorf("failed to process task channel: %w", err)
-	}
-
-	return nil
-}
-
-// waitForCompletion waits for the application to complete or be interrupted
-func waitForCompletion(app *AppContext) {
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		<-app.ctx.Done()
-		app.log.Info("Initiating graceful shutdown")
-
-		// Create a timeout context for shutdown
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), app.config.ShutdownWait)
-		defer shutdownCancel()
-
-		// Shutdown dispatcher first, then worker pool
-		if err := app.dispatcher.Shutdown(shutdownCtx); err != nil {
-			app.log.Error("Error shutting down dispatcher: %v", err)
-		}
-
-		if err := app.pool.Shutdown(shutdownCtx); err != nil {
-			app.log.Error("Error shutting down worker pool: %v", err)
-		}
-
-		app.log.Info("Shutdown complete")
-	}()
-
-	// Wait for shutdown to complete
-	wg.Wait()
-}
-
-// displayMetrics shows the final worker pool metrics
-func displayMetrics(pool *worker.Pool) {
-	metrics := pool.GetMetrics()
-
-	fmt.Println("\nFinal Metrics:")
-	fmt.Printf("Tasks Queued:    %d\n", metrics.TasksQueued.Load())
-	fmt.Printf("Tasks Processed: %d\n", metrics.TasksProcessed.Load())
-	fmt.Printf("Tasks Completed: %d\n", metrics.TasksCompleted.Load())
-	fmt.Printf("Tasks Failed:    %d\n", metrics.TasksFailed.Load())
-
-	completionRate := 0.0
-	if metrics.TasksProcessed.Load() > 0 {
-		completionRate = float64(metrics.TasksCompleted.Load()) / float64(metrics.TasksProcessed.Load()) * 100
-	}
-
-	fmt.Printf("Completion Rate: %.1f%%\n", completionRate)
 }
