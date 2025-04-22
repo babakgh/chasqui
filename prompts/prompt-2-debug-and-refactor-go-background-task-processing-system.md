@@ -30,3 +30,6 @@ When we run the app - tasks are not getting completed. The metrics show that tas
    - Move metric display to a separate function
    - Improve readability and maintainability
    - Ensure proper separation of concerns
+
+---
+_Filename: prompt-2-debug-and-refactor-go-background-task-processing-system.md_

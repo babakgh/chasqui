@@ -25,3 +25,6 @@ Create a Go application that can execute multiple background tasks concurrently 
 8. Create example tasks that implement the `Work` interface
 9. Write tests to validate the system behavior
 10. Add documentation with usage examples
+
+---
+_Filename: prompt-1-create-go-application-for-concurrent-background-task-processing.md_
